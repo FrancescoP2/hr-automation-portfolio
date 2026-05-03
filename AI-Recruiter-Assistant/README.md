@@ -17,6 +17,7 @@ Off-the-shelf ATS scoring is often shallow (keyword matching), and enterprise so
 A configurable workflow that takes a job description as input and returns a ranked, scored shortlist of candidates with rationale. Two-stage AI evaluation balances cost (cheap pre-screening pass) with quality (deeper final ranking).
 
 ## Architecture
+![AI Recruiter Architecture](./ai-recruiter-architecture.jpg)
 
 ```
 Form Trigger (JD + thresholds)
