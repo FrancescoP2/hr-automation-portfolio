@@ -2,14 +2,6 @@
 
 Production-ready HR automation workflows built with **n8n**, integrating **Personio**, **Microsoft 365**, **Google Sheets**, and **LLM APIs** to streamline recruiting and onboarding processes at scale.
 
-## About
-
-I'm **Francesco Petrone**, an HR Operations professional based in Munich with hands-on experience in HR automation, talent acquisition, and data quality. This repository showcases sanitized versions of workflows I've designed and deployed in real enterprise environments.
-
-- 📍 Munich, Germany
-- 💼 [LinkedIn](https://linkedin.com/in/francescopetrone2/)
-- 🌍 Multilingual: Italian (native), Spanish & Portuguese (C2), English (C1), German (A2)
-
 ## Projects
 
 ### 🚀 [Onboarding Wizard](./onboarding-wizard/)
