@@ -25,6 +25,7 @@ A webhook-triggered automation that fires when a Personio employee enters "Onboa
 7. Falls back to manual HRBP notification for unsupported offices
 
 ## Architecture
+![Onboarding Wizard Architecture](./onboarding-wizard-architecture.png)
 
 ```
 Personio Webhook (status change)
