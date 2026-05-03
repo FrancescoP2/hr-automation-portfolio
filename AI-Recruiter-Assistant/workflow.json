@@ -1,0 +1,778 @@
+{
+  "name": "AI Recruiter Assistant - Sample Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "AI Recruiter Assistant",
+        "formDescription": "Inserisci la job description per avviare lo screening dei candidati da Personio.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Job Title",
+              "placeholder": "es. Finance Intern",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Job Description",
+              "fieldType": "textarea",
+              "placeholder": "Incolla qui la job description completa",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Minimum Score",
+              "fieldType": "number",
+              "placeholder": "60"
+            },
+            {
+              "fieldLabel": "Top N Candidates",
+              "fieldType": "number",
+              "placeholder": "5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "84089d7d-a0a3-4108-be86-c61badce6e97",
+      "name": "Form Trigger",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        9840,
+        2736
+      ],
+      "webhookId": "de160c59-c6c6-4619-b4fe-16fe8cdef19c",
+      "notes": "Il team HR compila questo form per avviare lo screening. Nessuno deve toccare il workflow."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "jd-title",
+              "name": "jd_title",
+              "value": "={{ $json['Job Title'] }}",
+              "type": "string"
+            },
+            {
+              "id": "jd-text",
+              "name": "jd_text",
+              "value": "={{ $json['Job Description'] }}",
+              "type": "string"
+            },
+            {
+              "id": "min-score",
+              "name": "min_score",
+              "value": "={{ Number($json['Minimum Score']) || 60 }}",
+              "type": "number"
+            },
+            {
+              "id": "top-n",
+              "name": "top_n",
+              "value": "={{ Number($json['Top N Candidates']) || 5 }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bfd184e4-37b5-452b-9fc6-99be0172b57f",
+      "name": "Settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        10080,
+        2736
+      ],
+      "notes": "Normalizza i campi del form in variabili con nomi prevedibili. Valori di default: min_score=60, top_n=5."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.personio.de/v1/auth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ client_id: $credentials.httpBasicAuth.user, client_secret: $credentials.httpBasicAuth.password }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "eb8cc3d4-0748-4406-879b-85f5cdf6a2f5",
+      "name": "Personio Auth",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        10320,
+        2736
+      ],
+      "notes": "Crea in n8n: Credential 'HTTP Basic Auth' → User = client_id, Password = client_secret."
+    },
+    {
+      "parameters": {
+        "url": "https://api.personio.de/v2/recruiting/applications",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "100"
+            },
+            {
+              "name": "offset",
+              "value": "0"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Personio Auth').first().json.data.token }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8287a4c1-55cf-4164-92e4-c1cb3a4010dc",
+      "name": "Get Applications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        10560,
+        2736
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// PREREQUISITI:\n// 1. Crea risorsa \"Document Intelligence\" su Azure Portal (tier Free = 500 pag/mese)\n// 2. In n8n, aggiungi una credenziale \"Header Auth\" chiamata \"Azure Doc Intelligence\":\n//    - Header Name: Ocp-Apim-Subscription-Key\n//    - Header Value: la tua API key\n// 3. Sostituisci AZURE_DOC_INTEL_ENDPOINT qui sotto col tuo endpoint reale\n//\n// COME FUNZIONA:\n// 1. Scarica il PDF come buffer binario da Personio\n// 2. Lo invia ad Azure Document Intelligence (modello prebuilt-read)\n// 3. Polling fino a completamento (Azure lo processa async)\n// 4. Estrae il testo e lo aggiunge al profilo candidato\n// ============================================================\n \nconst AZURE_DOC_INTEL_ENDPOINT = 'https://YOUR-RESOURCE.cognitiveservices.azure.com';\nconst AZURE_DOC_INTEL_KEY = 'YOUR_API_KEY'; // Oppure usa $credentials se configuri Header Auth\nconst MAX_CANDIDATES = 200;\nconst CV_CHAR_LIMIT = 4000; // Tronca CV lunghi per non esplodere il prompt AI\n \nconst authToken = $('Personio Auth').first().json.data.token;\nconst firstBatch = $('Get Applications').first().json;\n \nlet allApplications = firstBatch.data || [];\nconst total = firstBatch.metadata?.total_elements || allApplications.length;\n \n// --- PAGINAZIONE ---\nif (total > 100) {\n  let offset = 100;\n  while (offset < total && allApplications.length < MAX_CANDIDATES) {\n    try {\n      const response = await this.helpers.httpRequest({\n        method: 'GET',\n        url: 'https://api.personio.de/v2/recruiting/applications',\n        headers: { 'Authorization': `Bearer ${authToken}`, 'Accept': 'application/json' },\n        qs: { limit: 100, offset }\n      });\n      if (response.data?.length > 0) {\n        allApplications = allApplications.concat(response.data);\n      } else break;\n      offset += 100;\n    } catch (e) { break; }\n  }\n}\nallApplications = allApplications.slice(0, MAX_CANDIDATES);\n \n// --- DEDUPLICAZIONE: tieni l'applicazione più recente per email ---\nconst seen = new Map();\nfor (const app of allApplications) {\n  const attrs = app.attributes || {};\n  const key = attrs.email?.value || String(app.id);\n  const date = attrs.application_date?.value || '1970-01-01';\n  if (!seen.has(key) || date > seen.get(key).date) {\n    seen.set(key, { app, date });\n  }\n}\nconst uniqueApps = [...seen.values()].map(v => v.app);\n \n// =============================================================\n// FUNZIONE: Estrai testo da PDF via Azure Document Intelligence\n// =============================================================\nasync function extractTextFromPdf(pdfBuffer) {\n  // Step 1: Invia il PDF per l'analisi (async — Azure restituisce un URL di polling)\n  const analyzeResponse = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${AZURE_DOC_INTEL_ENDPOINT}/documentintelligence/documentModels/prebuilt-read:analyze?api-version=2024-11-30`,\n    headers: {\n      'Ocp-Apim-Subscription-Key': AZURE_DOC_INTEL_KEY,\n      'Content-Type': 'application/pdf'\n    },\n    body: pdfBuffer,\n    returnFullResponse: true,\n    encoding: null // invia bytes grezzi\n  });\n \n  // Step 2: Ottieni l'URL di polling dall'header \"Operation-Location\"\n  const operationUrl = analyzeResponse.headers?.['operation-location'];\n  if (!operationUrl) {\n    throw new Error('Azure non ha restituito operation-location');\n  }\n \n  // Step 3: Polling fino a completamento (max 30 secondi)\n  let result = null;\n  for (let attempt = 0; attempt < 15; attempt++) {\n    await new Promise(r => setTimeout(r, 2000));\n \n    const pollResponse = await this.helpers.httpRequest({\n      method: 'GET',\n      url: operationUrl,\n      headers: {\n        'Ocp-Apim-Subscription-Key': AZURE_DOC_INTEL_KEY\n      }\n    });\n \n    if (pollResponse.status === 'succeeded') {\n      result = pollResponse;\n      break;\n    } else if (pollResponse.status === 'failed') {\n      throw new Error('Azure Document Intelligence: analisi fallita');\n    }\n    // 'running' → continua polling\n  }\n \n  if (!result) {\n    throw new Error('Azure Document Intelligence: timeout dopo 30s');\n  }\n \n  // Step 4: Estrai il testo da tutte le pagine\n  const pages = result.analyzeResult?.pages || [];\n  const lines = [];\n  for (const page of pages) {\n    for (const line of (page.lines || [])) {\n      lines.push(line.content);\n    }\n  }\n \n  // Fallback: se pages non ha lines, prova content diretto\n  if (lines.length === 0 && result.analyzeResult?.content) {\n    return result.analyzeResult.content.substring(0, CV_CHAR_LIMIT);\n  }\n \n  return lines.join('\\n').substring(0, CV_CHAR_LIMIT);\n}\n \n// --- COSTRUISCI PROFILO + FETCH CV ---\nconst candidates = [];\nfor (let i = 0; i < uniqueApps.length; i++) {\n  const app = uniqueApps[i];\n  const attrs = app.attributes || {};\n  const firstName = attrs.first_name?.value || '';\n  const lastName = attrs.last_name?.value || '';\n  const name = `${firstName} ${lastName}`.trim() || `Candidate ${i + 1}`;\n \n  const profileParts = [];\n  if (attrs.job_position?.value) profileParts.push(`Position applied: ${attrs.job_position.value}`);\n  if (attrs.application_date?.value) profileParts.push(`Date: ${attrs.application_date.value}`);\n  if (attrs.message?.value) profileParts.push(`Cover letter: ${attrs.message.value}`);\n \n  const skipFields = new Set(['first_name', 'last_name', 'job_position', 'application_date', 'id', 'message', 'email']);\n  const customFields = Object.entries(attrs)\n    .filter(([key, val]) => !skipFields.has(key) && val?.value)\n    .map(([key, val]) => `${key}: ${typeof val.value === 'object' ? JSON.stringify(val.value) : val.value}`)\n    .join('\\n');\n  if (customFields) profileParts.push(customFields);\n \n  // --- FETCH CV VIA AZURE DOCUMENT INTELLIGENCE ---\n  let cvText = '';\n  try {\n    const docs = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `https://api.personio.de/v1/recruiting/applications/${app.id}/documents`,\n      headers: { 'Authorization': `Bearer ${authToken}`, 'Accept': 'application/json' }\n    });\n \n    if (docs.data?.length > 0) {\n      // Prendi solo il primo documento (tipicamente il CV)\n      const doc = docs.data[0];\n      const downloadUrl = doc.attributes?.url?.value || doc.url || '';\n \n      if (downloadUrl) {\n        try {\n          // Scarica PDF come buffer binario (NON utf-8!)\n          const pdfBuffer = await this.helpers.httpRequest({\n            method: 'GET',\n            url: downloadUrl,\n            headers: { 'Authorization': `Bearer ${authToken}` },\n            encoding: null,          // <-- CRITICO: binario, non utf-8\n            returnFullResponse: false\n          });\n \n          if (pdfBuffer && pdfBuffer.length > 100) {\n            const extractedText = await extractTextFromPdf.call(this, pdfBuffer);\n            if (extractedText && extractedText.length > 50) {\n              cvText = 'CV Content:\\n' + extractedText;\n            }\n          }\n        } catch (dlError) {\n          cvText = `[CV download/parse failed: ${dlError.message}]`;\n        }\n      }\n    }\n  } catch (e) {\n    // Documents endpoint non accessibile — continua senza CV\n  }\n \n  if (cvText) profileParts.push(cvText);\n \n  candidates.push({\n    json: {\n      CandidateID: app.id || i + 1,\n      Name: name,\n      ProfileText: profileParts.join('\\n') || 'No profile data available',\n      _hasCv: cvText.startsWith('CV Content') // flag utile per debug\n    }\n  });\n \n  // Throttle: pausa ogni 5 candidati (Azure ha rate limits)\n  if (i < uniqueApps.length - 1 && i % 5 === 4) {\n    await new Promise(r => setTimeout(r, 1000));\n  }\n}\n \nreturn candidates;\n "
+      },
+      "id": "57a62869-ba7a-4814-b330-993fe9484b71",
+      "name": "Extract & Deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10800,
+        2736
+      ],
+      "notes": "Hard cap 200 candidati. Deduplicazione per email (tiene applicazione più recente). Tenta fetch CV da Personio documents API — se il documento è PDF binario, serve pdf-parse (vedi README). Throttle ogni 10 candidati."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Raggruppa candidati in batch da 5 per ridurre chiamate API\nconst allCandidates = $input.all().map(i => i.json);\nconst BATCH_SIZE = 5;\nconst batches = [];\n\nfor (let i = 0; i < allCandidates.length; i += BATCH_SIZE) {\n  batches.push({\n    json: {\n      batch_index: Math.floor(i / BATCH_SIZE),\n      candidates: allCandidates.slice(i, i + BATCH_SIZE),\n      total_batches: Math.ceil(allCandidates.length / BATCH_SIZE)\n    }\n  });\n}\n\nreturn batches;\n"
+      },
+      "id": "27f65320-8c91-42b2-b61c-9daade736217",
+      "name": "Create Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11040,
+        2736
+      ],
+      "notes": "Raggruppa in batch da 5. Con 100 candidati = 20 chiamate API invece di 100. Con 200 = 40 chiamate."
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "92087742-beb1-40cd-807c-03b14267481b",
+      "name": "Loop Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        11264,
+        2736
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_AZURE_ENDPOINT.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-10-21",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({messages: [{ role: 'system', content: 'You are an expert HR screener. Evaluate EACH candidate below against the job description independently.\\n\\nSCORING RUBRIC (follow strictly):\\n- 85-100: Direct experience in this exact role + all key competencies clearly demonstrated\\n- 70-84: Related experience in similar roles + most key competencies present\\n- 55-69: Partially relevant background + some transferable skills\\n- 40-54: Minimal relevant experience, few matching skills\\n- Below 40: Profile not aligned with requirements\\n\\nRULES:\\n- Base your evaluation ONLY on data provided. Do NOT invent or assume information.\\n- The summary must cite specific skills, qualifications, and experience from the candidate profile.\\n- If candidate data is sparse, score conservatively and note the lack of data.' },{ role: 'user', content: '=== JOB DESCRIPTION ===\\n' + $('Settings').first().json.jd_text + '\\n\\n=== CANDIDATES TO EVALUATE ===\\n' + $json.candidates.map(c => '--- Candidate ---\\nID: ' + c.CandidateID + '\\nName: ' + c.Name + '\\n' + c.ProfileText).join('\\n\\n') }],response_format: { type: 'json_schema', json_schema: { name: 'batch_prescreen', strict: true, schema: {type: 'object', properties: { evaluations: { type: 'array', items: { type: 'object', properties: {candidateId: { type: 'number' }, name: { type: 'string' }, score: { type: 'number' }, summary: { type: 'string' }}, required: ['candidateId', 'name', 'score', 'summary'], additionalProperties: false } } },required: ['evaluations'], additionalProperties: false } } },temperature: 0.2, max_tokens: 1500}) }}",
+        "options": {
+          "timeout": 45000
+        }
+      },
+      "id": "6c59451c-74d0-41eb-8f87-b1364ea4e281",
+      "name": "AI Pre-Screen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        11488,
+        2736
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Batch di 5 candidati per chiamata. Rubrica di scoring esplicita per consistenza. Temperature 0.2 per determinismo. Timeout 45s per batch più grandi. 3 retry con 3s di intervallo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse risposta AI batch — estrai array di evaluations\nlet responseText = '';\ntry {\n  responseText = $input.item.json.choices?.[0]?.message?.content || '';\n} catch(e) { responseText = ''; }\n\nif (!responseText) {\n  return [{ json: { candidateId: 0, name: 'API_ERROR', score: 0, summary: 'Batch skipped — API error' } }];\n}\n\nlet result;\ntry {\n  result = JSON.parse(responseText);\n} catch(e) {\n  const clean = responseText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  try { result = JSON.parse(clean); } catch(e2) {\n    // Ultimo tentativo: estrai primo oggetto JSON\n    const match = clean.match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n      try { result = JSON.parse(match[0]); } catch(e3) {\n        return [{ json: { candidateId: 0, name: 'PARSE_ERROR', score: 0, summary: 'Could not parse batch response' } }];\n      }\n    } else {\n      return [{ json: { candidateId: 0, name: 'PARSE_ERROR', score: 0, summary: 'No JSON found in response' } }];\n    }\n  }\n}\n\nconst evaluations = result.evaluations || [];\nif (evaluations.length === 0) {\n  return [{ json: { candidateId: 0, name: 'EMPTY_RESULT', score: 0, summary: 'No evaluations in batch' } }];\n}\n\n// Flatten: un item per candidato\nreturn evaluations.map(e => ({ json: e }));\n"
+      },
+      "id": "d59a72d3-691f-4ca9-834f-2346e0c3d2e7",
+      "name": "Parse Pre-Screen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11712,
+        2736
+      ],
+      "notes": "Parse con fallback progressivo (JSON → clean → regex). Flatten batch in singoli item per il collect successivo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Raccogli TUTTI i risultati dal loop (executionOrder v1 → .all() funziona)\nconst allItems = $('Parse Pre-Screen').all().map(i => i.json);\n\nconst minScore = $('Settings').first().json.min_score || 60;\nconst topN = $('Settings').first().json.top_n || 5;\nconst jdText = $('Settings').first().json.jd_text;\nconst jdTitle = $('Settings').first().json.jd_title;\n\n// Filtra errori di parsing (candidateId === 0)\nconst valid = allItems.filter(c => c.candidateId > 0);\n\n// Safety check CORRETTO: non esplode con 1 candidato, ma avvisa se 0\nif (valid.length === 0) {\n  return [{\n    json: {\n      total_screened: 0,\n      above_threshold: 0,\n      no_candidates_above_threshold: true,\n      jd_text: jdText,\n      jd_title: jdTitle,\n      candidate_list: 'Nessun candidato valutato con successo. Controllare i log delle chiamate API.',\n      top_n: topN,\n      execution_time: new Date().toISOString(),\n      _warning: 'Zero valid candidates — check API responses'\n    }\n  }];\n}\n\nconst filtered = valid\n  .filter(c => c.score >= minScore)\n  .sort((a, b) => b.score - a.score);\n\n// Passa top_n + 10 al ranking per dare margine all'AI\nconst topCandidates = filtered.slice(0, Math.min(topN + 10, filtered.length));\n\nconst candidateList = topCandidates.map(c =>\n  `ID:${c.candidateId} | ${c.name} | Pre-Screen Score: ${c.score}/100 | ${c.summary}`\n).join('\\n\\n');\n\nreturn [{\n  json: {\n    total_screened: valid.length,\n    above_threshold: filtered.length,\n    no_candidates_above_threshold: filtered.length === 0,\n    jd_text: jdText,\n    jd_title: jdTitle,\n    candidate_list: candidateList || 'Nessun candidato sopra la soglia di ' + minScore,\n    top_n: topN,\n    execution_time: new Date().toISOString()\n  }\n}];\n"
+      },
+      "id": "cde1fc2a-4d75-4d1b-87d0-67acd4b0c66c",
+      "name": "Collect & Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11264,
+        3040
+      ],
+      "notes": "Safety check CORRETTO: gestisce 0 e 1 candidato senza esplodere. Filtra sotto-soglia, ordina per score, passa top_n+10 al ranking finale."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-candidates",
+              "leftValue": "={{ $json.no_candidates_above_threshold }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "bf0d24d8-5128-4e86-a576-73d7b171c5a9",
+      "name": "Has Candidates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        11504,
+        3040
+      ],
+      "notes": "Se nessun candidato sopra soglia, salta direttamente alla notifica di 'nessun risultato'. Evita chiamate API inutili."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_AZURE_ENDPOINT.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME/chat/completions?api-version=2024-10-21",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({messages: [{ role: 'system', content: 'You are an expert Headhunter producing a final candidate ranking.\\n\\nRULES:\\n- Base your reasoning and interview questions ONLY on information present in each candidate's summary.\\n- Do NOT invent skills, experience, or qualifications not explicitly mentioned.\\n- Interview questions must target specific gaps or verify specific claims from the summary.\\n- match_score can differ from the pre-screen score based on your holistic assessment.' },{ role: 'user', content: 'Produce the FINAL TOP ' + $json.top_n + ' ranking for: ' + $json.jd_title + '\\n\\n=== JOB DESCRIPTION ===\\n' + $json.jd_text + '\\n\\n=== PRE-SCREENED CANDIDATES (sorted by pre-screen score) ===\\n' + $json.candidate_list }],response_format: { type: 'json_schema', json_schema: { name: 'ranking', strict: true, schema: {type: 'object', properties: { top_candidates: { type: 'array', items: { type: 'object', properties: {rank: { type: 'number' }, CandidateID: { type: 'number' }, Name: { type: 'string' },match_score: { type: 'number' }, reasoning: { type: 'string' },interview_questions: { type: 'array', items: { type: 'string' } }}, required: ['rank', 'CandidateID', 'Name', 'match_score', 'reasoning', 'interview_questions'],additionalProperties: false } } }, required: ['top_candidates'], additionalProperties: false } } },temperature: 0.1, max_tokens: 3000}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "c6eacff1-03b4-4fe8-ab81-40fd6104dd3c",
+      "name": "AI Final Ranking",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        11744,
+        2944
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Temperature 0.1 per massimo determinismo. Prompt anti-allucinazione: l'AI deve basarsi SOLO sui summary forniti. onError → branch di errore con notifica."
+    },
+    {
+      "parameters": {
+        "jsCode": "const responseText = $input.item.json.choices?.[0]?.message?.content || '';\n\nlet result;\ntry {\n  result = JSON.parse(responseText);\n} catch(e) {\n  const clean = responseText.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  try { result = JSON.parse(clean); } catch(e2) {\n    const match = clean.match(/\\{[\\s\\S]*\\}/);\n    if (match) {\n      try { result = JSON.parse(match[0]); } catch(e3) {\n        throw new Error('Impossibile parsare il ranking finale: ' + clean.substring(0, 300));\n      }\n    } else {\n      throw new Error('Nessun JSON nel ranking finale: ' + clean.substring(0, 300));\n    }\n  }\n}\n\nconst rankings = result.top_candidates || [];\nconst stats = $('Collect & Filter').first().json;\n\nreturn rankings.map(r => ({\n  json: {\n    Rank: r.rank,\n    CandidateID: r.CandidateID,\n    Name: r.Name,\n    'Match Score': r.match_score,\n    Reasoning: r.reasoning,\n    'Interview Questions': (r.interview_questions || []).join(' | '),\n    Position: stats.jd_title,\n    'Total Screened': stats.total_screened,\n    'Above Threshold': stats.above_threshold,\n    Timestamp: stats.execution_time\n  }\n}));\n"
+      },
+      "id": "96c0939a-2027-408e-a1a3-50cfc4386691",
+      "name": "Parse Final Ranking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11984,
+        2944
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Ranking",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "d8a5f92e-6eb4-4ce9-9190-d620b82b26a2",
+      "name": "Google Sheets - Ranking",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        12224,
+        2848
+      ],
+      "notes": "Foglio 'Ranking': colonne Rank, CandidateID, Name, Match Score, Reasoning, Interview Questions, Position, Total Screened, Above Threshold, Timestamp."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $('Collect & Filter').first().json;\nconst rankings = $input.all().map(i => i.json);\n\nreturn [{\n  json: {\n    Timestamp: stats.execution_time,\n    Position: stats.jd_title,\n    'Total Screened': stats.total_screened,\n    'Above Threshold': stats.above_threshold,\n    'Top Candidate': rankings.length > 0 ? rankings[0].Name : 'N/A',\n    'Top Score': rankings.length > 0 ? rankings[0]['Match Score'] : 'N/A',\n    'Candidates Ranked': rankings.length,\n    'Min Score Threshold': $('Settings').first().json.min_score\n  }\n}];\n"
+      },
+      "id": "c34d655e-7459-464d-9fde-4a6cdc37dfcc",
+      "name": "Build Log Entry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12224,
+        3024
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {}
+        },
+        "options": {}
+      },
+      "id": "f20f4fe6-ea13-4809-aeaf-a14dc995326d",
+      "name": "Google Sheets - Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        12464,
+        3024
+      ],
+      "notes": "Foglio 'Log' nello stesso Google Sheet. Una riga per esecuzione. Utile per calibrare la soglia nel tempo."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $('Collect & Filter').first().json;\nconst rankings = $('Parse Final Ranking').all().map(i => i.json);\n\nconst topList = rankings.slice(0, 5).map(r =>\n  `${r.Rank}. ${r.Name} — Score: ${r['Match Score']}/100`\n).join('\\n');\n\nconst message = `✅ *Screening completato: ${stats.jd_title}*\\n\\n` +\n  `Candidati analizzati: ${stats.total_screened}\\n` +\n  `Sopra soglia: ${stats.above_threshold}\\n\\n` +\n  `*Top ${Math.min(5, rankings.length)} candidati:*\\n${topList}\\n\\n` +\n  `Dettagli completi nel Google Sheet.`;\n\nreturn [{ json: { text: message } }];\n"
+      },
+      "id": "9cb39465-ecad-4d34-8128-eb35a92ea5a3",
+      "name": "Build Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12224,
+        3168
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "REPLACE_SLACK_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "c5275c4a-2bd6-4c52-978b-bfd9ae010bd3",
+      "name": "Send Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        12464,
+        3200
+      ],
+      "notes": "Sostituisci URL con il tuo Slack Incoming Webhook, oppure adatta per Teams/Email. Il messaggio include top 5 candidati e statistiche."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $('Collect & Filter').first().json;\n\nconst message = `⚠️ *Errore nel ranking finale: ${stats.jd_title}*\\n\\n` +\n  `Il pre-screening è stato completato (${stats.total_screened} candidati analizzati, ${stats.above_threshold} sopra soglia), ` +\n  `ma il ranking finale ha fallito.\\n\\n` +\n  `I risultati del pre-screen sono disponibili nei log. Ritentare l'esecuzione o verificare la configurazione Azure OpenAI.\\n\\n` +\n  `Timestamp: ${stats.execution_time}`;\n\nreturn [{ json: { text: message } }];\n"
+      },
+      "id": "53fc67ba-e081-4ae5-80c8-762672380c1b",
+      "name": "Build Error Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11984,
+        3216
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "REPLACE_SLACK_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b04efd58-5a7a-480c-9bc7-addbb65f5a82",
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        12224,
+        3312
+      ],
+      "notes": "Notifica di errore — stesso webhook di Slack. Il recruiter sa che il pre-screen è andato ma il ranking no."
+    },
+    {
+      "parameters": {
+        "jsCode": "const stats = $('Collect & Filter').first().json;\n\nconst message = `ℹ️ *Nessun candidato sopra soglia: ${stats.jd_title}*\\n\\n` +\n  `Candidati analizzati: ${stats.total_screened}\\n` +\n  `Nessuno ha superato la soglia minima di ${$('Settings').first().json.min_score}/100.\\n\\n` +\n  `Suggerimento: abbassare la soglia o rivedere la job description.`;\n\nreturn [{ json: { text: message } }];\n"
+      },
+      "id": "ea0e17cb-530a-4932-8ae5-26e5f74bbb4f",
+      "name": "Build No-Result Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        11744,
+        3200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "REPLACE_SLACK_WEBHOOK_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "1e2f8df1-e08a-4c8a-ba2f-9ad86133d755",
+      "name": "Send No-Result Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        11984,
+        3408
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Form Trigger": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Personio Auth",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Personio Auth": {
+      "main": [
+        [
+          {
+            "node": "Get Applications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Applications": {
+      "main": [
+        [
+          {
+            "node": "Extract & Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "Create Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Batches": {
+      "main": [
+        [
+          {
+            "node": "Loop Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Batches": {
+      "main": [
+        [
+          {
+            "node": "AI Pre-Screen",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect & Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Pre-Screen": {
+      "main": [
+        [
+          {
+            "node": "Parse Pre-Screen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Pre-Screen": {
+      "main": [
+        [
+          {
+            "node": "Loop Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect & Filter": {
+      "main": [
+        [
+          {
+            "node": "Has Candidates?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Candidates?": {
+      "main": [
+        [
+          {
+            "node": "AI Final Ranking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build No-Result Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Final Ranking": {
+      "main": [
+        [
+          {
+            "node": "Parse Final Ranking",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Final Ranking": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Ranking",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Log Entry",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Log Entry": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Notification": {
+      "main": [
+        [
+          {
+            "node": "Send Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Notification": {
+      "main": [
+        [
+          {
+            "node": "Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build No-Result Notification": {
+      "main": [
+        [
+          {
+            "node": "Send No-Result Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "sanitized-version",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1bc0c85c380fc047448bb3cc05ff57308e96c41d0163f50df03a13d1d1c975d6"
+  },
+  "id": "example-ai-recruiter",
+  "tags": []
+}

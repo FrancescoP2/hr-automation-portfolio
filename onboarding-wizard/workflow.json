@@ -1,0 +1,386 @@
+{
+  "name": "HR Onboarding Wizard - Sample Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "personio-onboarding",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Personio Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "personio-onboarding",
+      "notes": "Receives Person.updated webhook from Personio when employee status changes. Configure this URL in Personio: Settings > API > Webhooks"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "id": "webhook-response",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        450,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-status",
+              "leftValue": "={{ $json.body.data.attributes.status.value }}",
+              "rightValue": "onboarding",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-status",
+      "name": "Status = Onboarding?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        450,
+        300
+      ],
+      "notes": "Only proceed if the employee status changed to 'onboarding' (contract signed)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.personio.de/v1/auth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "client_id",
+              "value": "={{ $env.PERSONIO_CLIENT_ID }}"
+            },
+            {
+              "name": "client_secret",
+              "value": "={{ $env.PERSONIO_CLIENT_SECRET }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "personio-auth",
+      "name": "Personio Auth",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        650,
+        300
+      ],
+      "notes": "Authenticate with Personio API to get bearer token"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.personio.de/v1/company/employees/{{ $('Status = Onboarding?').item.json.body.data.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Personio Auth').item.json.data.token }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-employee",
+      "name": "GET Employee Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        850,
+        300
+      ],
+      "notes": "Fetch full employee profile: name, email, department, office, hire_date, custom attributes. Make sure all needed attributes are whitelisted in Personio API credentials."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "condition-munich",
+              "leftValue": "={{ $json.data.attributes.office.value }}",
+              "rightValue": "Munich",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-munich",
+      "name": "Office = Munich?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1050,
+        300
+      ],
+      "notes": "PILOT: Only process Munich employees. For other offices, route to manual notification (future expansion). IMPORTANT: Check the exact value of 'office' in your Personio (could be 'München', 'Munich', 'DE-MUC', etc.)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// CALCULATE NEXT ONBOARDING DATE\n// ExampleCorp Munich: 1st or 15th of the month\n// If weekend, shift to next Monday\n// ============================================\n\nconst employee = $input.first().json;\nconst hireDate = new Date(employee.data.attributes.hire_date.value);\nconst today = new Date();\n\n// Extract employee data\nconst firstName = employee.data.attributes.first_name.value;\nconst lastName = employee.data.attributes.last_name.value;\nconst email = employee.data.attributes.email.value;\nconst department = employee.data.attributes.department.value;\nconst position = employee.data.attributes.position.value;\nconst office = employee.data.attributes.office.value;\n\n// Function: get next 1st or 15th after a given date\nfunction getNextOnboardingDate(fromDate) {\n  let candidates = [];\n  \n  // Check current month and next 2 months\n  for (let m = 0; m <= 2; m++) {\n    let d = new Date(fromDate);\n    d.setMonth(d.getMonth() + m);\n    \n    // 1st of that month\n    let first = new Date(d.getFullYear(), d.getMonth(), 1);\n    candidates.push(first);\n    \n    // 15th of that month\n    let fifteenth = new Date(d.getFullYear(), d.getMonth(), 15);\n    candidates.push(fifteenth);\n  }\n  \n  // Filter: must be >= hireDate and >= today\n  let validDates = candidates.filter(d => d >= fromDate && d >= today);\n  \n  // Sort and get the earliest\n  validDates.sort((a, b) => a - b);\n  \n  if (validDates.length === 0) return null;\n  \n  let onboardingDate = validDates[0];\n  \n  // If weekend, shift to next Monday\n  const dayOfWeek = onboardingDate.getDay();\n  if (dayOfWeek === 0) { // Sunday -> Monday (+1)\n    onboardingDate.setDate(onboardingDate.getDate() + 1);\n  } else if (dayOfWeek === 6) { // Saturday -> Monday (+2)\n    onboardingDate.setDate(onboardingDate.getDate() + 2);\n  }\n  \n  return onboardingDate;\n}\n\nconst onboardingDate = getNextOnboardingDate(hireDate);\n\n// Format date for display and Outlook\nconst dateOptions = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };\nconst formattedDate = onboardingDate.toLocaleDateString('de-DE', dateOptions);\nconst isoDate = onboardingDate.toISOString().split('T')[0];\n\n// Outlook event times (09:00 - 17:00 CET)\nconst startDateTime = isoDate + 'T09:00:00';\nconst endDateTime = isoDate + 'T17:00:00';\n\nreturn [{\n  json: {\n    employee: {\n      firstName,\n      lastName,\n      fullName: `${firstName} ${lastName}`,\n      email,\n      department,\n      position,\n      office\n    },\n    onboarding: {\n      date: isoDate,\n      formattedDate,\n      startDateTime,\n      endDateTime,\n      timeZone: 'W. Europe Standard Time',\n      location: 'ExampleCorp Munich Office' // UPDATE: add exact address\n    }\n  }\n}];"
+      },
+      "id": "calc-date",
+      "name": "Calculate Onboarding Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        200
+      ],
+      "notes": "Calculates next available onboarding date (1st or 15th). If the date falls on a weekend, it shifts to Monday. Returns structured employee + onboarding data for downstream nodes."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_SENDER_EMAIL }}/sendMail",
+        "authentication": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"message\": {\n    \"subject\": \"Willkommen bei ExampleCorp! - Onboarding {{ $json.onboarding.formattedDate }}\",\n    \"body\": {\n      \"contentType\": \"HTML\",\n      \"content\": \"<div style='font-family: Arial, sans-serif; max-width: 600px;'>\" +\n        \"<h2 style='color: #E8593C;'>Willkommen bei ExampleCorp, {{ $json.employee.firstName }}!</h2>\" +\n        \"<p>Wir freuen uns sehr, dich im Team begrüßen zu dürfen.</p>\" +\n        \"<p>Dein erster Tag ist am <strong>{{ $json.onboarding.formattedDate }}</strong> in unserem Büro in München.</p>\" +\n        \"<h3>Was dich erwartet:</h3>\" +\n        \"<p>Im Anhang findest du die Agenda für deinen Onboarding-Tag. Bitte bring Folgendes mit:</p>\" +\n        \"<ul>\" +\n        \"<li>Personalausweis / Reisepass</li>\" +\n        \"<li>Sozialversicherungsausweis</li>\" +\n        \"<li>Bankverbindung für die Gehaltsabrechnung</li>\" +\n        \"</ul>\" +\n        \"<p>Falls du Fragen hast, melde dich jederzeit bei uns.</p>\" +\n        \"<p>Bis bald!<br><strong>HR Team ExampleCorp</strong></p>\" +\n        \"</div>\"\n    },\n    \"toRecipients\": [\n      {\n        \"emailAddress\": {\n          \"address\": \"{{ $json.employee.email }}\",\n          \"name\": \"{{ $json.employee.fullName }}\"\n        }\n      }\n    ]\n  },\n  \"saveToSentItems\": true\n}",
+        "options": {}
+      },
+      "id": "send-welcome",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        100
+      ],
+      "notes": "Sends welcome email to the new employee's private email. UPDATE: Customize the HTML template, add CC recipients (from Personio 'access' section), and attach the onboarding agenda PDF."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_SENDER_EMAIL }}/sendMail",
+        "authentication": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"message\": {\n    \"subject\": \"[IT Setup] Neuer Mitarbeiter: {{ $json.employee.fullName }} - Start {{ $json.onboarding.formattedDate }}\",\n    \"body\": {\n      \"contentType\": \"HTML\",\n      \"content\": \"<div style='font-family: Arial, sans-serif; max-width: 600px;'>\" +\n        \"<h2 style='color: #065A82;'>Neuer Mitarbeiter - IT Setup erforderlich</h2>\" +\n        \"<table style='border-collapse: collapse; width: 100%; margin: 16px 0;'>\" +\n        \"<tr style='border-bottom: 1px solid #ddd;'><td style='padding: 8px; font-weight: bold;'>Name</td><td style='padding: 8px;'>{{ $json.employee.fullName }}</td></tr>\" +\n        \"<tr style='border-bottom: 1px solid #ddd;'><td style='padding: 8px; font-weight: bold;'>Position</td><td style='padding: 8px;'>{{ $json.employee.position }}</td></tr>\" +\n        \"<tr style='border-bottom: 1px solid #ddd;'><td style='padding: 8px; font-weight: bold;'>Abteilung</td><td style='padding: 8px;'>{{ $json.employee.department }}</td></tr>\" +\n        \"<tr style='border-bottom: 1px solid #ddd;'><td style='padding: 8px; font-weight: bold;'>Standort</td><td style='padding: 8px;'>{{ $json.employee.office }}</td></tr>\" +\n        \"<tr style='border-bottom: 1px solid #ddd;'><td style='padding: 8px; font-weight: bold;'>Startdatum</td><td style='padding: 8px;'>{{ $json.onboarding.formattedDate }}</td></tr>\" +\n        \"</table>\" +\n        \"<h3>Bitte vorbereiten:</h3>\" +\n        \"<ul>\" +\n        \"<li>E-Mail-Konto erstellen ({{ $json.employee.firstName.toLowerCase() }}.{{ $json.employee.lastName.toLowerCase() }}@ExampleCorp.com)</li>\" +\n        \"<li>Laptop konfigurieren und bereitstellen</li>\" +\n        \"<li>VPN-Zugangsdaten erstellen</li>\" +\n        \"<li>Mobiltelefon (falls zutreffend)</li>\" +\n        \"<li>Zugangskarte / Gebäudezugang</li>\" +\n        \"</ul>\" +\n        \"<p style='color: #666; font-size: 12px;'>Diese E-Mail wurde automatisch vom Onboarding Wizard generiert.</p>\" +\n        \"</div>\"\n    },\n    \"toRecipients\": [\n      {\n        \"emailAddress\": {\n          \"address\": \"{{ $env.IT_MUNICH_EMAIL }}\",\n          \"name\": \"IT Team Munich\"\n        }\n      }\n    ]\n  },\n  \"saveToSentItems\": true\n}",
+        "options": {}
+      },
+      "id": "notify-it",
+      "name": "Notify IT - Equipment Setup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        300
+      ],
+      "notes": "Sends structured notification to IT Munich with all details needed to prepare equipment. UPDATE: Replace IT_MUNICH_EMAIL env var with actual IT group email."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_SENDER_EMAIL }}/calendar/events",
+        "authentication": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"subject\": \"Onboarding: {{ $json.employee.fullName }} - {{ $json.employee.position }}\",\n  \"body\": {\n    \"contentType\": \"HTML\",\n    \"content\": \"<div style='font-family: Arial, sans-serif;'>\" +\n      \"<h2>Onboarding Day - {{ $json.employee.fullName }}</h2>\" +\n      \"<p><strong>Position:</strong> {{ $json.employee.position }}</p>\" +\n      \"<p><strong>Abteilung:</strong> {{ $json.employee.department }}</p>\" +\n      \"<hr>\" +\n      \"<h3>Agenda</h3>\" +\n      \"<ul>\" +\n      \"<li>09:00 - Empfang & Willkommen</li>\" +\n      \"<li>09:30 - Unternehmensvorstellung</li>\" +\n      \"<li>10:30 - IT Setup & Zugangsdaten</li>\" +\n      \"<li>11:30 - Bürotour</li>\" +\n      \"<li>12:00 - Mittagessen mit dem Team</li>\" +\n      \"<li>13:00 - HR Formalitäten & Dokumentation</li>\" +\n      \"<li>14:30 - Abteilungseinführung</li>\" +\n      \"<li>16:00 - Wrap-up & Fragen</li>\" +\n      \"</ul>\" +\n      \"</div>\"\n  },\n  \"start\": {\n    \"dateTime\": \"{{ $json.onboarding.startDateTime }}\",\n    \"timeZone\": \"{{ $json.onboarding.timeZone }}\"\n  },\n  \"end\": {\n    \"dateTime\": \"{{ $json.onboarding.endDateTime }}\",\n    \"timeZone\": \"{{ $json.onboarding.timeZone }}\"\n  },\n  \"location\": {\n    \"displayName\": \"{{ $json.onboarding.location }}\"\n  },\n  \"attendees\": [\n    {\n      \"emailAddress\": {\n        \"address\": \"{{ $json.employee.email }}\",\n        \"name\": \"{{ $json.employee.fullName }}\"\n      },\n      \"type\": \"required\"\n    }\n  ],\n  \"isReminderOn\": true,\n  \"reminderMinutesBeforeStart\": 1440\n}",
+        "options": {}
+      },
+      "id": "create-event",
+      "name": "Create Outlook Event",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        500
+      ],
+      "notes": "Creates calendar event in Outlook for the onboarding day. Sends invite to the new employee + HR + IT attendees. UPDATE: Add HR and IT attendees to the 'attendees' array. Reminder set to 24h before."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// PLACEHOLDER: Other offices (future expansion)\n// ============================================\n// For non-Munich offices, send a manual notification\n// to the local HRBP to handle onboarding manually.\n// \n// Future: add branches for Berlin, Milan, Madrid, etc.\n// Each branch will have its own:\n// - Onboarding dates logic\n// - IT contact email\n// - Welcome email template (language)\n// - Calendar event details\n// ============================================\n\nconst employee = $input.first().json;\n\nreturn [{\n  json: {\n    message: `Manual onboarding required for ${employee.data.attributes.first_name.value} ${employee.data.attributes.last_name.value}`,\n    office: employee.data.attributes.office.value,\n    action: 'Send notification to local HRBP'\n  }\n}];"
+      },
+      "id": "other-offices",
+      "name": "Other Offices (Future)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        500
+      ],
+      "notes": "PLACEHOLDER: For non-Munich offices. Currently just logs. Future: add office-specific branches with local IT contacts, onboarding dates, and localized email templates."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.microsoft.com/v1.0/users/{{ $env.OUTLOOK_SENDER_EMAIL }}/sendMail",
+        "authentication": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"message\": {\n    \"subject\": \"[Action Required] Manual Onboarding: {{ $json.message }}\",\n    \"body\": {\n      \"contentType\": \"HTML\",\n      \"content\": \"<p>A new employee at <strong>{{ $json.office }}</strong> requires manual onboarding setup.</p><p>Please handle according to local procedures.</p><p style='color: #666; font-size: 12px;'>This office is not yet configured in the Onboarding Wizard. Contact HR Ops to add it.</p>\"\n    },\n    \"toRecipients\": [\n      {\n        \"emailAddress\": {\n          \"address\": \"{{ $env.HRBP_FALLBACK_EMAIL }}\",\n          \"name\": \"HRBP\"\n        }\n      }\n    ]\n  },\n  \"saveToSentItems\": true\n}",
+        "options": {}
+      },
+      "id": "notify-hrbp-manual",
+      "name": "Notify HRBP (Manual)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1500,
+        700
+      ],
+      "notes": "Fallback: notifies HRBP when the office is not yet automated. This ensures no onboarding is missed even for non-Munich offices."
+    }
+  ],
+  "connections": {
+    "Personio Webhook": {
+      "main": [
+        [
+          {
+            "node": "Status = Onboarding?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status = Onboarding?": {
+      "main": [
+        [
+          {
+            "node": "Personio Auth",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Personio Auth": {
+      "main": [
+        [
+          {
+            "node": "GET Employee Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Employee Details": {
+      "main": [
+        [
+          {
+            "node": "Office = Munich?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Office = Munich?": {
+      "main": [
+        [
+          {
+            "node": "Calculate Onboarding Date",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Other Offices (Future)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Onboarding Date": {
+      "main": [
+        [
+          {
+            "node": "Send Welcome Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify IT - Equipment Setup",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Outlook Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Other Offices (Future)": {
+      "main": [
+        [
+          {
+            "node": "Notify HRBP (Manual)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "onboarding"
+    },
+    {
+      "name": "HR"
+    },
+    {
+      "name": "pilot-munich"
+    }
+  ],
+  "triggerCount": 1,
+  "pinData": {}
+}
