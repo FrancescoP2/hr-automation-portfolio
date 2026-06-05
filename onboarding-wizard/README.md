@@ -43,6 +43,8 @@ The architecture is webhook-driven rather than polled — nothing runs on a sche
 
 The office routing is deliberately built to fail loud, not quiet. The "unknown office" path was the first thing I added once I realised the bigger risk wasn't a bug, it was a new hire falling into a gap nobody noticed. Routing everything unrecognised to a human felt safer than trying to handle every case up front.
 
+The webhook gets a clean response on both branches — including when the status isn't "Onboarding" and the workflow stops early. It's a small thing, but it means Personio never sees a hanging request and never retries on a case that was handled correctly.
+
 Email templates are prepared in German and English, since hires aren't all local.
 
 ## Running it yourself
@@ -55,8 +57,8 @@ This is a generalised version, so you'd need to wire in your own credentials and
 4. Adjust the email templates to your branding.
 5. Set the sender email and a couple of other environment values.
 
-## Note
+## A note on the data
 
-This is a sanitised version of something I built and deployed for the Munich office of my current employer. Endpoints, templates, office names and the specifics of the business logic have been generalised — the structure and the approach are intact, the company details are not. Published as a portfolio reference, not as a drop-in tool.
+I built and deployed this for the Munich office of the company I work at, so what's here is a generalised version — real endpoints, email templates, office names and the company-specific logic have been swapped for placeholders. The structure and the approach are the actual ones; the company's details aren't in it. It's here as a portfolio reference, not something you'd drop straight into production.
 
-The screenshot shows a warning on the "GET Employee Details" node, by the way — that's just because the live API credentials aren't connected in the public copy. It runs fine when they are.
+The screenshot shows a warning on the "GET Employee Details" node — that's just the live API credentials not being connected in the public copy. It runs fine when they are.
