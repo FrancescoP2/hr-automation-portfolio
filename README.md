@@ -10,13 +10,13 @@ The short version of what I do: I come from the HR side, I understand the proces
 Stack: n8n, Personio API, Microsoft Graph (OAuth2).
 
 **[AI Recruiter Assistant](./AI-Recruiter-Assistant)** — first-pass CV screening for high-volume roles. A two-stage LLM pipeline filters cheaply then ranks deeply, so a recruiter gets a scored shortlist with reasoning instead of a few hundred CVs to read. Batched for volume, logged for auditing, honest about being a triage tool and not a decision-maker.
-Stack: n8n, Personio API, LLM (OpenAI/Anthropic), Google Sheets API, Microsoft Graph.
+Stack: n8n, Personio API, Azure OpenAI (in-tenant), Google Sheets API, Slack.
 
 Each folder has its own README with the full reasoning, the architecture, and the things that broke along the way.
 
-## A note on these being sanitised
+## A note on the data
 
-Both of these were built for the company I work at, so what's published here is generalised — endpoints, credentials, templates and the company-specific business logic have been swapped for placeholders. The architecture and the implementation patterns are the real ones. I've kept the disclaimer because handling confidential and GDPR-relevant data properly is part of the job, and pretending otherwise wouldn't reflect how this actually works.
+Both of these were built for the company I work at, so what's published here is generalised — endpoints, credentials, templates and the company-specific logic are placeholders. The architecture and the implementation patterns are the real ones. I've kept this note because handling confidential and GDPR-relevant data properly is part of the job, and I'd rather be upfront about how that works than pretend the company's internals are sitting in a public repo.
 
 ## Contact
 
