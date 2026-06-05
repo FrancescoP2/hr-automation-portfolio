@@ -19,7 +19,9 @@ Then comes the two-stage part, which is the whole idea:
 
 Running the expensive model on everyone would have worked too, but it was wasteful — most of the spend was being burned on candidates that were never going to make the cut. Splitting it into a cheap filter and a deep ranking is where the cost savings come from; in practice the two-stage setup runs at roughly a third of what a single deep pass cost, since most CVs never reach stage two.
 
-Output goes to two Google Sheets — the ranking itself, and a separate activity log of every run. Notifications cover three cases: it worked, it errored, or it found nobody above threshold. That last one mattered to me — a recruiter should never be left wondering whether the thing ran and found nothing, or just broke.
+The scoring runs on Azure OpenAI rather than a public API endpoint — a deliberate choice, since candidate data stays inside the company's Azure tenant instead of being sent out to a third-party service. The workflow can be pointed at other providers, but for anything touching real applicant data, the in-tenant route is the one that matters.
+
+Output goes to two Google Sheets — the ranking itself, and a separate activity log of every run. Notifications go out over Slack and cover three cases: it worked, it errored, or it found nobody above threshold. That last one mattered to me — a recruiter should never be left wondering whether the thing ran and found nothing, or just broke.
 
 ## Architecture
 
@@ -53,7 +55,7 @@ Form trigger (JD, min_score, top_n)
 
 ## Stack
 
-n8n for orchestration, triggered by its built-in form node. Personio REST API for the applicant data, an LLM API (works with OpenAI or Anthropic — it's configurable) for the scoring, Google Sheets for output and logging, and Microsoft Graph for the notifications.
+n8n for orchestration, triggered by its built-in form node. Personio REST API for the applicant data, Azure OpenAI for the scoring (in-tenant, so candidate data doesn't leave the company perimeter), Google Sheets for output and logging, and Slack for the notifications.
 
 ## Why it's on version 4
 
@@ -67,16 +69,16 @@ This screens, it doesn't decide. LLM scoring always needs a human in the loop be
 
 On bias: the prompts need auditing for proxy bias on protected attributes, regularly, not once. The activity log exists partly so that's even possible after the fact.
 
-On GDPR: candidate data goes through a third-party LLM API, so a DPA needs to be in place before this runs on real data. That's not optional and it's the first thing to sort out before deploying anything like this.
+On GDPR: even with Azure OpenAI keeping data in-tenant, candidate data is still being processed by an LLM, so the data processing terms need to be in order before this runs on real applicants. The in-tenant route makes this far easier than a public API would, but it doesn't remove the need to get it right.
 
 ## Running it yourself
 
 1. Import `workflow.json` into n8n.
-2. Add credentials: Personio, your LLM API, Google Sheets OAuth2, Microsoft Graph.
+2. Add credentials: Personio, Azure OpenAI, Google Sheets OAuth2, Slack webhook.
 3. Set up the form fields (job title, JD, min score, top N).
 4. Create the two target Google Sheets.
 5. Adapt the prompts in the AI nodes to your own criteria and tone — this is the part that actually matters, the rest is plumbing.
 
-## Note
+## A note on the data
 
-Sanitised version of a real system. Prompts, business logic and endpoints have been generalised; the architecture and the reasoning behind it are the real thing.
+Generalised version of a real system — the prompts, the company-specific logic and the integration endpoints have been swapped for placeholders. The architecture and the thinking behind it are the real thing; the company's data isn't in it.
